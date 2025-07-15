@@ -1,0 +1,1 @@
+# Virtual Calisthenics Trainer source package 

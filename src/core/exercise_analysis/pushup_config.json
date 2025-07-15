@@ -1,0 +1,140 @@
+{
+  "views": {
+    "side": {
+      "detection_criteria": {
+        "shoulder_torso_ratio": {"min": 0.20, "max": 0.28},
+        "shoulder_visibility_threshold": 0.85,
+        "symmetry_threshold": 0.08,
+        "confidence_threshold": 0.6
+      },
+      "required_angles": [
+        "left_elbow", "right_elbow", "hip_angle", 
+        "neck_angle", "body_floor_angle", "knee_angle"
+      ],
+      "form_rules": {
+        "elbow_range": {
+          "min": 80, "max": 180,
+          "min_message": "Bend your elbows more at the bottom.",
+          "max_message": "Don't lock out your elbows at the top.",
+          "message": "Bend your elbows more at the bottom and avoid locking out at the top."
+        },
+        "hip_angle": {
+          "min": 160, "max": 180,
+          "min_message": "Keep your hips from sagging; maintain a straight line.",
+          "max_message": "Don't overextend your hips; keep your body straight.",
+          "message": "Keep your hips in line with your shoulders and feet."
+        },
+        "neck_angle": {
+          "min": 140, "max": 180,
+          "min_message": "Lift your head slightly; keep your neck neutral.",
+          "max_message": "Don't overextend your neck; keep your gaze down.",
+          "message": "Keep your neck neutral, avoid looking too far up or down."
+        },
+        "body_alignment": {
+          "min": 0, "max": 90,
+          "min_message": "Maintain a straight body; avoid sagging.",
+          "max_message": "Don't arch your back; keep your body straight.",
+          "message": "Keep your body straight and aligned from head to toe."
+        }
+      },
+      "phase_thresholds": {
+        "descent_start": 155,
+        "bottom_reached": {"beginner": 100, "intermediate": 95, "advanced": 85},
+        "ascent_start": 95,
+        "top_reached": {"beginner": 160, "intermediate": 165, "advanced": 170},
+        "rest_threshold": {"beginner": 165, "intermediate": 170, "advanced": 175}
+      },
+      "max_depth": 130,
+      "ideal_depth": 70,
+      "landmark_reliability": {
+        "primary": ["shoulder", "elbow", "wrist", "hip"],
+        "secondary": ["neck", "knee", "ankle"]
+      }
+    },
+    "front": {
+      "detection_criteria": {
+        "shoulder_torso_ratio": {"min": 0.32, "max": 0.45},
+        "shoulder_visibility_threshold": 0.85,
+        "symmetry_threshold": 0.08,
+        "confidence_threshold": 0.6
+      },
+      "required_angles": [
+        "left_elbow", "right_elbow", "shoulder_symmetry", 
+        "wrist_distance", "hip_symmetry"
+      ],
+      "form_rules": {
+        "elbow_range": {
+          "min": 80, "max": 180,
+          "min_message": "Bend your elbows more at the bottom.",
+          "max_message": "Don't lock out your elbows at the top.",
+          "message": "Bend your elbows more at the bottom and avoid locking out at the top."
+        },
+        "shoulder_symmetry": {
+          "max": 0.1,
+          "max_message": "Keep your shoulders level and avoid twisting your torso.",
+          "message": "Keep your shoulders level and avoid twisting your torso."
+        },
+        "wrist_distance": {
+          "min": 0.20, "max": 0.90,
+          "min_message": "Bring your hands closer together.",
+          "max_message": "Move your hands further apart.",
+          "message": "Keep your hands shoulder-width apart."
+        },
+        "hip_symmetry": {
+          "max": 0.08,
+          "max_message": "Keep your hips level and avoid sagging or twisting.",
+          "message": "Keep your hips level and avoid sagging or twisting."
+        }
+      },
+      "phase_thresholds": {
+        "descent_start": 150,
+        "bottom_reached": {"beginner": 105, "intermediate": 95, "advanced": 85},
+        "ascent_start": 95,
+        "top_reached": {"beginner": 155, "intermediate": 160, "advanced": 165},
+        "rest_threshold": {"beginner": 160, "intermediate": 165, "advanced": 170}
+      },
+      "max_depth": 130,
+      "ideal_depth": 70,
+      "landmark_reliability": {
+        "primary": ["shoulder", "elbow", "wrist"],
+        "secondary": ["hip", "knee"]
+      }
+    }
+  },
+  "variants": {
+    "diamond": {
+      "form_rules": {
+        "wrist_distance": {
+          "max": 0.15,
+          "max_message": "Keep your hands close together for diamond push-ups.",
+          "message": "Keep your hands close together for diamond push-ups."
+        },
+        "elbow_range": {
+          "min": 85, "max": 155,
+          "min_message": "Bend your elbows more at the bottom for diamond push-ups.",
+          "max_message": "Don't lock out your elbows at the top for diamond push-ups.",
+          "message": "Keep your elbows bent and hands close for diamond push-ups."
+        }
+      }
+    },
+    "wide": {
+      "form_rules": {
+        "wrist_distance": {
+          "min": 0.35,
+          "min_message": "Place your hands wider apart for wide push-ups.",
+          "message": "Place your hands wider apart for wide push-ups."
+        },
+        "shoulder_symmetry": {
+          "max": 0.15,
+          "max_message": "Keep your shoulders level even in wide push-ups.",
+          "message": "Keep your shoulders level even in wide push-ups."
+        }
+      }
+    }
+  },
+  "form_quality": {
+    "min_body_alignment_score": 0.7,
+    "max_asymmetry_score": 0.3,
+    "min_depth_achievement": 1.0
+  }
+}

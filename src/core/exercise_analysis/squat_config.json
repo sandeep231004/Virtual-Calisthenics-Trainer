@@ -1,0 +1,34 @@
+{
+  "views": {
+    "side": {
+      "required_angles": ["left_knee", "right_knee", "left_hip", "right_hip", "left_ankle", "right_ankle"],
+      "phase_thresholds": {
+        "bottom_reached": {"beginner": 90, "intermediate": 100, "advanced": 110},
+        "top_reached": {"beginner": 170, "intermediate": 175, "advanced": 180}
+      },
+      "form_rules": {
+        "left_knee": {"min": 80, "max": 180},
+        "right_knee": {"min": 80, "max": 180},
+        "left_hip": {"min": 60, "max": 180},
+        "right_hip": {"min": 60, "max": 180}
+      },
+      "detection_criteria": {
+        "shoulder_visibility_threshold": 0.5
+      }
+    },
+    "front": {
+      "required_angles": ["left_knee", "right_knee"],
+      "phase_thresholds": {
+        "bottom_reached": {"beginner": 90, "intermediate": 100, "advanced": 110},
+        "top_reached": {"beginner": 170, "intermediate": 175, "advanced": 180}
+      },
+      "form_rules": {
+        "left_knee": {"min": 80, "max": 180},
+        "right_knee": {"min": 80, "max": 180}
+      },
+      "detection_criteria": {
+        "shoulder_visibility_threshold": 0.5
+      }
+    }
+  }
+} 

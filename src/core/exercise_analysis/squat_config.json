@@ -4,30 +4,52 @@
       "required_angles": ["left_knee", "right_knee", "left_hip", "right_hip", "left_ankle", "right_ankle"],
       "phase_thresholds": {
         "bottom_reached": {"beginner": 90, "intermediate": 100, "advanced": 110},
-        "top_reached": {"beginner": 170, "intermediate": 175, "advanced": 180}
+        "top_reached": {"beginner": 170, "intermediate": 175, "advanced": 180},
+        "rest_threshold": {"beginner": 175, "intermediate": 178, "advanced": 180},
+        "descent_start": {"beginner": 160, "intermediate": 165, "advanced": 170},
+        "ascent_start": {"beginner": 100, "intermediate": 105, "advanced": 110}
       },
       "form_rules": {
-        "left_knee": {"min": 80, "max": 180},
-        "right_knee": {"min": 80, "max": 180},
+        "left_knee": {
+          "min": 80,
+          "max": 180,
+          "max_message": "Don't go too deep. Stop before your hips drop below your knees (60°)."
+        },
+        "right_knee": {
+          "min": 80,
+          "max": 180,
+          "max_message": "Don't go too deep. Stop before your hips drop below your knees (60°)."
+        },
         "left_hip": {"min": 60, "max": 180},
         "right_hip": {"min": 60, "max": 180}
       },
       "detection_criteria": {
-        "shoulder_visibility_threshold": 0.5
+        "shoulder_visibility_threshold": 0.4
       }
     },
     "front": {
       "required_angles": ["left_knee", "right_knee"],
       "phase_thresholds": {
         "bottom_reached": {"beginner": 90, "intermediate": 100, "advanced": 110},
-        "top_reached": {"beginner": 170, "intermediate": 175, "advanced": 180}
+        "top_reached": {"beginner": 170, "intermediate": 175, "advanced": 180},
+        "rest_threshold": {"beginner": 175, "intermediate": 178, "advanced": 180},
+        "descent_start": {"beginner": 160, "intermediate": 165, "advanced": 170},
+        "ascent_start": {"beginner": 100, "intermediate": 105, "advanced": 110}
       },
       "form_rules": {
-        "left_knee": {"min": 80, "max": 180},
-        "right_knee": {"min": 80, "max": 180}
+        "left_knee": {
+          "min": 80,
+          "max": 180,
+          "max_message": "Don't go too deep. Stop before your hips drop below your knees (60°)."
+        },
+        "right_knee": {
+          "min": 80,
+          "max": 180,
+          "max_message": "Don't go too deep. Stop before your hips drop below your knees (60°)."
+        }
       },
       "detection_criteria": {
-        "shoulder_visibility_threshold": 0.5
+        "shoulder_visibility_threshold": 0.4
       }
     }
   }

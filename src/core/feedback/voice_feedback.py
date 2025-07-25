@@ -32,7 +32,7 @@ class VoiceFeedback:
         self._last_feedback_message = None
         self._last_violation = None
         self._violation_persist_count = 0
-        self._violation_debounce_threshold = 2  # frames
+        self._violation_debounce_threshold = 1  # Announce violations immediately
         
         # Feedback messages for different violations
         self.feedback_messages = {
@@ -64,6 +64,7 @@ class VoiceFeedback:
     def generate_feedback(self, exercise_state) -> Optional[str]:
         """
         Generate voice feedback based on exercise state.
+        All violations are concatenated and announced immediately (no debounce).
 
         Args:
             exercise_state: Current state of the exercise (ExerciseState object)
@@ -77,7 +78,7 @@ class VoiceFeedback:
         if current_time - self.last_feedback_time < self.feedback_cooldown:
             return None
 
-        # Handle unreliable analysis (ambiguous/partial/unknown view)
+        # Handle unreliable analysis (ambiguous/partial/unknown view, missing data)
         if not exercise_state.analysis_reliable:
             err = exercise_state.error_message
             if err:
@@ -86,11 +87,20 @@ class VoiceFeedback:
                     "partial view": "Partial view detected. Make sure your whole body is visible to the camera.",
                     "Unable to determine torso/shoulder ratio": "Camera cannot see enough of your body. Adjust your position or camera angle.",
                     "Some body parts are not visible": "Some body parts are not visible. Please adjust your position or camera.",
+                    "Missing required angles": "Some joint angles could not be detected. Please adjust your position or camera.",
+                    "Missing required landmarks": "Some body parts are not visible. Please adjust your position or camera.",
                 }
+                feedback = None
                 for key, msg in ambiguous_map.items():
                     if key.lower() in err.lower():
                         feedback = msg
                         break
+                if not feedback:
+                    # Generic fallback for any missing data
+                    if "missing required angles" in err.lower():
+                        feedback = "Some joint angles could not be detected. Please adjust your position or camera."
+                    elif "missing required landmarks" in err.lower():
+                        feedback = "Some body parts are not visible. Please adjust your position or camera."
                 else:
                     feedback = err
                 if feedback == self._last_feedback_message:
@@ -102,7 +112,7 @@ class VoiceFeedback:
 
         # Get violations
         violations = exercise_state.violations
-        violation = violations[0] if violations else None
+        violation = "; ".join(violations) if violations else None
         # Debounce logic: only speak if violation persists for threshold frames
         if violation:
             if violation == self._last_violation:
@@ -117,12 +127,15 @@ class VoiceFeedback:
         else:
             self._violation_persist_count = 0
             self._last_violation = None
-            # Positive feedback based on phase
-            phase = exercise_state.phase
-            if phase == "up":
-                feedback = self.feedback_messages["good_form"]
-            elif phase == "rest":
-                feedback = self.feedback_messages["rest_needed"]
+            # Only give positive feedback if there are NO violations, analysis is reliable, and no missing data
+            if exercise_state.analysis_reliable and not exercise_state.violations and not exercise_state.error_message:
+                phase = exercise_state.phase
+                if phase == "up":
+                    feedback = self.feedback_messages["good_form"]
+                elif phase == "rest":
+                    feedback = self.feedback_messages["rest_needed"]
+                else:
+                    return None
             else:
                 return None
 

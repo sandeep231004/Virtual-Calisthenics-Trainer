@@ -57,6 +57,7 @@ def calculate_length(a: List[float], b: List[float]) -> float:
     return float(np.linalg.norm(np.array(a[:2]) - np.array(b[:2])))
     
 def calculate_pushup_specific_angles(landmarks: Dict[str, List[float]], angles: Dict[str, float], min_visibility: float = 0.3, temporal_smoother=None) -> None:
+    """Calculate pushup-specific angles and store them in the angles dict."""
     # temporal_smoother: Optional[Callable[[str, float], float]]
     left_visibility = get_side_visibility(landmarks, "left")
     right_visibility = get_side_visibility(landmarks, "right")

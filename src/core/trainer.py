@@ -257,28 +257,36 @@ class VirtualCalisthenicsTrainer:
                         2
                     )
         else:
-            cv2.putText(
-                frame,
-                "Form: Correct",
-                (10, 120),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
-                2
-            )
-            # Show 'Go on' message and trigger voice feedback if not already spoken
-            cv2.putText(
-                frame,
-                "Go on! You can proceed.",
-                (10, 150),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.7,
-                (0, 200, 255),
-                2
-            )
-            if hasattr(self, 'voice_feedback'):
-                self.voice_feedback.speak_async("Go on! You can proceed.")
-            
+            # Only show encouragement if form is correct, analysis is reliable, and no missing data
+            if state.analysis_reliable and not state.violations and not state.error_message:
+                cv2.putText(
+                    frame,
+                    "Form: Correct",
+                    (10, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2
+                )
+                cv2.putText(
+                    frame,
+                    "Go on! You can proceed.",
+                    (10, 150),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.7,
+                    (0, 200, 255),
+                    2
+                )
+            else:
+                cv2.putText(
+                    frame,
+                    "Form: Correct",
+                    (10, 120),
+                    cv2.FONT_HERSHEY_SIMPLEX,
+                    0.6,
+                    (0, 255, 0),
+                    2
+                )
         # Display shoulder-torso ratio if available
         if 'angles' in result and 'shoulder_torso_ratio' in result['angles']:
             ratio = result['angles']['shoulder_torso_ratio']

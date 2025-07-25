@@ -5,7 +5,7 @@ from enum import Enum
 from collections import deque, Counter
 from .base_analyzer_robust import BaseExerciseAnalyzer, ExerciseState, UserLevel
 from .pose_utils import calculate_torso_length, calculate_length, check_landmark_visibility, calculate_pushup_specific_angles
-from .pose_utils import EMAFilter, should_skip_frame
+#from .pose_utils import EMAFilter, should_skip_frame
 from .config_utils import load_pushup_config
 import logging
 import tracemalloc

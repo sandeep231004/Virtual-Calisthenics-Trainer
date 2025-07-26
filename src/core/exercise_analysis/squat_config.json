@@ -24,7 +24,16 @@
         "right_hip": {"min": 60, "max": 180}
       },
       "detection_criteria": {
-        "shoulder_visibility_threshold": 0.4
+        "shoulder_visibility_threshold": 0.4,
+        "shoulder_torso_ratio": {"min": 0.20, "max": 0.40},
+        "symmetry_threshold": 0.10,
+        "confidence_threshold": 0.6
+      },
+      "max_depth": 130,
+      "ideal_depth": 70,
+      "landmark_reliability": {
+        "primary": ["left_shoulder", "right_shoulder", "left_hip", "right_hip", "left_knee", "right_knee"],
+        "secondary": ["left_ankle", "right_ankle"]
       }
     },
     "front": {
@@ -49,8 +58,22 @@
         }
       },
       "detection_criteria": {
-        "shoulder_visibility_threshold": 0.4
+        "shoulder_visibility_threshold": 0.4,
+        "shoulder_torso_ratio": {"min": 0.32, "max": 0.60},
+        "symmetry_threshold": 0.08,
+        "confidence_threshold": 0.6
+      },
+      "max_depth": 130,
+      "ideal_depth": 70,
+      "landmark_reliability": {
+        "primary": ["left_shoulder", "right_shoulder", "left_hip", "right_hip", "left_knee", "right_knee"],
+        "secondary": []
       }
     }
+  },
+  "form_quality": {
+    "min_body_alignment_score": 0.7,
+    "max_asymmetry_score": 0.3,
+    "min_depth_achievement": 1.0
   }
-} 
+}

@@ -1,14 +1,234 @@
-import numpy as np
-from enum import Enum
+# --- Imports and Config ---
 from typing import Dict, List, Any, Optional, Tuple
+import numpy as np
+import time
+from enum import Enum
 from collections import deque, Counter
 import logging
 from .base_analyzer_robust import BaseExerciseAnalyzer, ExerciseState, UserLevel
-from .pose_utils import calculate_torso_length, calculate_length, check_landmark_visibility, calculate_asymmetry_metrics
+from .pose_utils import calculate_torso_length, calculate_length, check_landmark_visibility, calculate_asymmetry_metrics, calculate_angle
 from .config_utils import load_squat_config
-import time
+import tracemalloc
+import traceback
+import numpy as np
+from typing import Callable, Dict, List, Optional, Tuple, Any
+from enum import Enum
+from collections import deque, Counter
 
 _SQUAT_CONFIG = load_squat_config()
+
+# --- Phase Enum ---
+class SquatPhase(Enum):
+    REST = "rest"
+    DESCENT = "descent"
+    BOTTOM = "bottom"
+    ASCENT = "ascent"
+    TOP = "top"
+
+
+# --- View Analyzer Registry ---
+SQUAT_VIEW_ANALYZER_REGISTRY = {}
+
+def register_squat_view_analyzer(view_type):
+    """Decorator to register view analyzer classes."""
+    def decorator(cls):
+        SQUAT_VIEW_ANALYZER_REGISTRY[view_type] = cls
+        return cls
+    return decorator
+
+# --- View-Specific Analyzers ---
+
+class SquatViewSpecificAnalyzer:
+    def __init__(self, view_type: str):
+        self.view_type = view_type
+        self.parent_analyzer = None
+        # Set min_landmark_visibility from config if available
+        try:
+            self.min_landmark_visibility = _SQUAT_CONFIG["views"][view_type]["detection_criteria"].get("shoulder_visibility_threshold", 0.5)
+        except Exception as e:
+            logger.warning(f"Could not load min_landmark_visibility from config for view {view_type}: {e}")
+            self.min_landmark_visibility = 0.5
+
+    def get_required_angles(self) -> List[str]:
+        try:
+            return _SQUAT_CONFIG["views"][self.view_type]["required_angles"]
+        except Exception as e:
+            logger.error(f"Could not load required_angles from config for view {self.view_type}: {e}")
+            return []
+
+    def get_phase_thresholds(self, user_level: UserLevel) -> Dict[str, float]:
+        try:
+            thresholds = _SQUAT_CONFIG["views"][self.view_type]["phase_thresholds"]
+            # Handle per-level dicts
+            if isinstance(thresholds.get("bottom_reached"), dict):
+                level = user_level.name.lower() if hasattr(user_level, "name") else str(user_level).lower()
+                return {k: (v[level] if isinstance(v, dict) and level in v else v)
+                        for k, v in thresholds.items()}
+            return thresholds
+        except Exception as e:
+            logger.error(f"Could not load phase_thresholds from config for view {self.view_type}: {e}")
+            return {}
+    def get_required_landmarks(self) -> List[str]:
+        raise NotImplementedError
+    
+    def validate_camera_position(self, landmarks: Dict[str, List[float]], angles=None) -> Tuple[bool, Optional[str]]:
+        raise NotImplementedError
+
+    def get_form_rules(self, user_level: UserLevel, exercise_variant: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
+        try:
+            base_rules = _SQUAT_CONFIG["views"][self.view_type]["form_rules"].copy()
+            
+            # Expand knee_range to left/right_knee for convenience
+            if "knee_range" in base_rules:
+                kr = base_rules.pop("knee_range")
+                base_rules["left_knee"] = kr.copy()
+                base_rules["right_knee"] = kr.copy()
+                
+            # Merge variant rules if present
+            if exercise_variant and exercise_variant in _SQUAT_CONFIG.get("variants", {}):
+                variant_rules = _SQUAT_CONFIG["variants"][exercise_variant].get("form_rules", {})
+                for angle, limits in variant_rules.items():
+                    if angle in base_rules:
+                        base_rules[angle].update(limits)
+                    else:
+                        base_rules[angle] = limits
+                        
+            return base_rules
+        except Exception as e:
+            logger.error(f"Could not load form_rules from config for view {self.view_type}: {e}")
+            return {}
+# Inherit get_required_angles, get_phase_thresholds, and get_form_rules from ViewSpecificAnalyzer
+
+
+@register_squat_view_analyzer('side')
+class SideSquatAnalyzer(SquatViewSpecificAnalyzer):
+    def __init__(self):
+        super().__init__('side')
+
+    def get_required_landmarks(self) -> List[str]:
+        return [
+            "left_shoulder", "right_shoulder",
+            "left_hip", "right_hip",
+            "left_knee", "right_knee",
+            "left_ankle", "right_ankle"
+        ]
+    
+    def validate_camera_position(self, landmarks: Dict[str, List[float]], angles=None) -> Tuple[bool, Optional[str]]:
+        if self.parent_analyzer is None:
+            return False, "Analyzer context missing."
+            
+        # 1. Check required landmarks for this view
+        required_landmarks = self.get_required_landmarks()
+        for lmk in required_landmarks:
+            if lmk not in landmarks or len(landmarks[lmk]) < 4 or landmarks[lmk][3] < self.min_landmark_visibility:
+                logger.warning(FeedbackGenerator.missing_landmark(lmk))
+                return False, FeedbackGenerator.missing_landmark(lmk)
+                
+        # 2. Check required angles for this view
+        if angles is not None:
+            required_angles = self.get_required_angles()
+            for ang in required_angles:
+                if ang not in angles or angles[ang] is None or (hasattr(np, 'isnan') and np.isnan(angles[ang])):
+                    logger.warning(FeedbackGenerator.missing_angle(ang))
+                    return False, FeedbackGenerator.missing_angle(ang)
+                    
+        # 3. Use centralized view voting logic
+        parent = getattr(self, 'parent_analyzer', None)
+        if parent is None:
+            return False, "Analyzer context missing."
+            
+        votes = parent.compute_view_votes(landmarks)
+        total = sum(votes.values())
+        if total == 0:
+            return False, "View could not be determined."            
+        best_view, best_score = max(votes.items(), key=lambda x: x[1])
+        confidence = best_score / total if total > 0 else 0.0
+        
+        # Store for debug output
+        shoulder_width = abs(landmarks["left_shoulder"][0] - landmarks["right_shoulder"][0]) if ("left_shoulder" in landmarks and "right_shoulder" in landmarks) else 0.0
+        torso_length = calculate_torso_length(landmarks)
+        perframe_ratio = (shoulder_width / torso_length) if (torso_length and torso_length > 0) else 0.0
+        
+        if hasattr(parent, '_last_body_metrics'):
+            parent._last_body_metrics = {
+                "shoulder_width": shoulder_width,
+                "torso_length": torso_length,
+                "shoulder_torso_ratio": perframe_ratio
+            }
+            
+        logger.debug(f"[CAM POS] View votes: {votes}, Best: {best_view}, Confidence: {confidence:.2f}")
+        
+        # Accept if best view matches this analyzer and confidence is high
+        if best_view == self.view_type and confidence >= 0.4:
+            return True, None
+            
+        feedback = f"Camera not positioned for {self.view_type} view. Current: {best_view} (conf {confidence:.2f}). Votes: {votes}"
+        return False, feedback
+
+@register_squat_view_analyzer('front')
+class FrontSquatAnalyzer(SquatViewSpecificAnalyzer):
+    def __init__(self):
+        super().__init__('front')
+
+    def get_required_landmarks(self) -> List[str]:
+        return [
+            "left_shoulder", "right_shoulder",
+            "left_hip", "right_hip",
+            "left_knee", "right_knee",
+            "left_ankle", "right_ankle"
+        ]
+    
+    def validate_camera_position(self, landmarks: Dict[str, List[float]], angles=None) -> Tuple[bool, Optional[str]]:
+        if self.parent_analyzer is None:
+            return False, "Analyzer context missing."
+            
+        # 1. Check required landmarks for this view
+        required_landmarks = self.get_required_landmarks()
+        for lmk in required_landmarks:
+            if lmk not in landmarks or len(landmarks[lmk]) < 4 or landmarks[lmk][3] < self.min_landmark_visibility:
+                logger.warning(FeedbackGenerator.missing_landmark(lmk))
+                return False, FeedbackGenerator.missing_landmark(lmk)
+                
+        # 2. Check required angles for this view
+        if angles is not None:
+            required_angles = self.get_required_angles()
+            for ang in required_angles:
+                if ang not in angles or angles[ang] is None or (hasattr(np, 'isnan') and np.isnan(angles[ang])):
+                    logger.warning(FeedbackGenerator.missing_angle(ang))
+                    return False, FeedbackGenerator.missing_angle(ang)
+                    
+        # 3. Use centralized view voting logic
+        parent = getattr(self, 'parent_analyzer', None)
+        if parent is None:
+            return False, "Analyzer context missing."
+            
+        votes = parent.compute_view_votes(landmarks)
+        total = sum(votes.values())
+        if total == 0:
+            return False, "View could not be determined."            
+        best_view, best_score = max(votes.items(), key=lambda x: x[1])
+        confidence = best_score / total if total > 0 else 0.0
+        
+        # Store for debug output
+        shoulder_width = abs(landmarks["left_shoulder"][0] - landmarks["right_shoulder"][0]) if ("left_shoulder" in landmarks and "right_shoulder" in landmarks) else 0.0
+        torso_length = calculate_torso_length(landmarks)
+        perframe_ratio = (shoulder_width / torso_length) if (torso_length and torso_length > 0) else 0.0
+        
+        if hasattr(parent, '_last_body_metrics'):
+            parent._last_body_metrics = {
+                "shoulder_width": shoulder_width,
+                "torso_length": torso_length,
+                "shoulder_torso_ratio": perframe_ratio
+            }
+            
+        logger.debug(f"[CAM POS] View votes: {votes}, Best: {best_view}, Confidence: {confidence:.2f}")
+        
+        # Accept if best view matches this analyzer and confidence is high
+        if best_view == self.view_type and confidence >= 0.4:
+            return True, None
+            
+        feedback = f"Camera not positioned for {self.view_type} view. Current: {best_view} (conf {confidence:.2f}). Votes: {votes}"
+        return False, feedback
 
 # --- Logger Setup ---
 logger = logging.getLogger("SquatAnalyzer")
@@ -52,152 +272,334 @@ class FeedbackGenerator:
     def camera_reposition_front():
         return "⚠️ Please move camera to view your body from the front"
 
-# --- Phase Enum ---
-class SquatPhase(Enum):
-    REST = "rest"
-    DESCENT = "descent"
-    BOTTOM = "bottom"
-    ASCENT = "ascent"
-    TOP = "top"
+# --- Generic FormRule and ExercisePhase ---
+class FormRule:
+    """Defines a form rule for validating joint angles during exercise execution."""
+    def __init__(self, angle_name, min_val=None, max_val=None, message=None, min_message=None, max_message=None):
+        self.angle_name = angle_name
+        self.min_val = min_val
+        self.max_val = max_val
+        self.message = message
+        self.min_message = min_message
+        self.max_message = max_message
+        
+    def check(self, angles: Dict[str, float]) -> Optional[str]:
+        val = angles.get(self.angle_name)
+        if val is None or (isinstance(val, float) and np.isnan(val)):
+            return FeedbackGenerator.missing_angle(self.angle_name)
+        if self.min_val is not None and val < self.min_val:
+            return self.min_message or self.message or f"{self.angle_name} below minimum"
+        if self.max_val is not None and val > self.max_val:
+            return self.max_message or self.message or f"{self.angle_name} above maximum"
+        return None
 
-# --- View Analyzer Registry ---
-SQUAT_VIEW_ANALYZER_REGISTRY = {}
+class ExercisePhase:
+    """Defines an exercise phase with entry and exit conditions."""
+    def __init__(self, name: str, entry_condition: Callable, exit_condition: Callable):
+        self.name = name
+        self.entry_condition = entry_condition
+        self.exit_condition = exit_condition
+        
+    def is_entry(self, angles: Dict[str, float]) -> bool:
+        """Check if the phase entry conditions are met."""
+        return self.entry_condition(angles)
+        
+    def is_exit(self, angles: Dict[str, float]) -> bool:
+        """Check if the phase exit conditions are met."""
+        return self.exit_condition(angles)
 
-def register_squat_view_analyzer(view_type):
-    def decorator(cls):
-        SQUAT_VIEW_ANALYZER_REGISTRY[view_type] = cls
-        return cls
-    return decorator
-
-# --- View-Specific Analyzers ---
-class SquatViewSpecificAnalyzer:
-    def __init__(self, view_type: str):
-        self.view_type = view_type
-        self.parent_analyzer = None
-        try:
-            self.min_landmark_visibility = _SQUAT_CONFIG["views"][view_type]["detection_criteria"].get("shoulder_visibility_threshold", 0.5)
-        except Exception as e:
-            logger.warning(f"Could not load min_landmark_visibility from config for view {view_type}: {e}")
-            self.min_landmark_visibility = 0.5
-
-    def get_required_angles(self) -> List[str]:
-        try:
-            return _SQUAT_CONFIG["views"][self.view_type]["required_angles"]
-        except Exception as e:
-            logger.error(f"Could not load required_angles from config for view {self.view_type}: {e}")
-            return []
-
-    def get_phase_thresholds(self, user_level: UserLevel) -> Dict[str, float]:
-        try:
-            thresholds = _SQUAT_CONFIG["views"][self.view_type]["phase_thresholds"]
-            # Always extract per-user-level value if dict, else use as is
-            level = user_level.name.lower() if hasattr(user_level, "name") else str(user_level).lower()
-            result = {}
-            for k, v in thresholds.items():
-                if isinstance(v, dict):
-                    # Use fallback order: user level, then any available value
-                    result[k] = v.get(level, next(iter(v.values())))
-                else:
-                    result[k] = v
-            return result
-        except Exception as e:
-            logger.error(f"Could not load phase_thresholds from config for view {self.view_type}: {e}")
-            return {}
-
-    def get_form_rules(self, user_level: UserLevel, exercise_variant: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
-        try:
-            base_rules = _SQUAT_CONFIG["views"][self.view_type]["form_rules"].copy()
-            # Optionally, add variant-specific rules here
-            return base_rules
-        except Exception as e:
-            logger.error(f"Could not load form_rules from config for view {self.view_type}: {e}")
-            return {}
-
-    def get_required_landmarks(self) -> List[str]:
-        raise NotImplementedError
-
-    def validate_camera_position(self, landmarks: Dict[str, List[float]], angles=None) -> Tuple[bool, Optional[str]]:
-        if self.parent_analyzer is None:
-            return False, FeedbackGenerator.camera_error("Analyzer context missing.")
-        required_landmarks = self.get_required_landmarks()
-        for lmk in required_landmarks:
-            if lmk not in landmarks or len(landmarks[lmk]) < 4 or landmarks[lmk][3] < self.min_landmark_visibility:
-                return False, FeedbackGenerator.missing_landmark(lmk)
-        # Optionally: add view voting logic here for more robustness
-        return True, None
-
-@register_squat_view_analyzer('side')
-class SideSquatAnalyzer(SquatViewSpecificAnalyzer):
+# --- Per-session calibration for view detection ---
+class SessionCalibration:
+    """Handles calibration of user-specific body proportions for better view detection."""
     def __init__(self):
-        super().__init__('side')
-    def get_required_landmarks(self) -> List[str]:
-        return [
-            "left_shoulder", "right_shoulder",
-            "left_hip", "right_hip",
-            "left_knee", "right_knee",
-            "left_ankle", "right_ankle"
-        ]
+        self.torso_lengths = []
+        self.shoulder_widths = []
+        self.calibrated = False
+        self.avg_torso = 1.0
+        self.avg_shoulder = 1.0
+    
+    def update(self, landmarks: Dict[str, List[float]]) -> None:
+        """
+        Update calibration with new landmark data.
+        
+        Args:
+            landmarks: Dictionary of landmark positions with visibility
+        """
+        try:
+            # Use consistent torso length calculation
+            torso = calculate_torso_length(landmarks)
+            if torso is not None:
+                self.torso_lengths.append(torso)
+                
+            if "left_shoulder" in landmarks and "right_shoulder" in landmarks:
+                shoulder = abs(landmarks["left_shoulder"][0] - landmarks["right_shoulder"][0])
+                self.shoulder_widths.append(shoulder)
+                
+            # Require at least 10 samples for calibration
+            if len(self.torso_lengths) > 10 and len(self.shoulder_widths) > 10:
+                self.avg_torso = np.median(self.torso_lengths)  # Use median for robustness to outliers
+                self.avg_shoulder = np.median(self.shoulder_widths)
+                self.calibrated = True
+        except Exception as e:
+            logger.error(f"Calibration error: {e}")
+    
+    def normalize(self, shoulder_width: float, torso_length: float) -> Tuple[float, float]:
+        """
+        Normalize the given shoulder width and torso length by the average torso length from calibration.
 
-@register_squat_view_analyzer('front')
-class FrontSquatAnalyzer(SquatViewSpecificAnalyzer):
-    def __init__(self):
-        super().__init__('front')
-    def get_required_landmarks(self) -> List[str]:
-        return [
-            "left_shoulder", "right_shoulder",
-            "left_hip", "right_hip",
-            "left_knee", "right_knee"
-        ]
+        Args:
+            shoulder_width: The measured shoulder width for the current frame
+            torso_length: The measured torso length for the current frame
 
+        Returns:
+            Tuple of (normalized_shoulder_width, normalized_torso_length) if calibrated, else raw values
+        """
+        if self.calibrated and self.avg_torso > 0:
+            return shoulder_width / self.avg_torso, torso_length / self.avg_torso
+        return shoulder_width, torso_length
+    
+    def recalibrate(self) -> None:
+        """Reset the calibration data."""
+        self.torso_lengths.clear()
+        self.shoulder_widths.clear()
+        self.calibrated = False
+        self.avg_torso = 1.0
+        self.avg_shoulder = 1.0
 # --- Main Analyzer ---
 class SquatAnalyzerBase(BaseExerciseAnalyzer):
-    def _calculate_rep_quality(self, angles, phase):
-        """Calculate rep quality using form_quality config, mirroring pushup analyzer."""
-        form_quality_cfg = _SQUAT_CONFIG.get("form_quality", {})
-        min_body_alignment = form_quality_cfg.get("min_body_alignment_score", 0.7)
-        max_asymmetry = form_quality_cfg.get("max_asymmetry_score", 0.3)
-        min_depth_achievement = form_quality_cfg.get("min_depth_achievement", 1.0)
-        # Placeholder: actual calculation would use pose/angle metrics
-        # For demonstration, set all to 1.0 (perfect) unless you have real metrics
-        quality = {
-            "body_alignment_score": angles.get("body_alignment_score", 1.0),
-            "asymmetry_score": angles.get("asymmetry_score", 0.0),
-            "depth_achieved": angles.get("depth_achieved", 1.0),
-            "form_quality_score": 0.0
-        }
-        # Compute form quality score as mean of factors (if available)
-        form_quality_factors = []
-        if quality["body_alignment_score"] >= min_body_alignment:
-            form_quality_factors.append(1.0)
-        else:
-            form_quality_factors.append(quality["body_alignment_score"] / min_body_alignment)
-        if quality["asymmetry_score"] <= max_asymmetry:
-            form_quality_factors.append(1.0)
-        else:
-            form_quality_factors.append(max(0, 1.0 - (quality["asymmetry_score"] - max_asymmetry)))
-        if quality["depth_achieved"] >= min_depth_achievement:
-            form_quality_factors.append(1.0)
-        else:
-            form_quality_factors.append(max(0, quality["depth_achieved"] / min_depth_achievement))
-        if form_quality_factors:
-            quality["form_quality_score"] = np.mean(form_quality_factors)
-        return quality
+    """
+    Base class for squat exercise analysis with form validation, phase detection, and calibration.
+    """
+    # Constants for view detection and analysis
+    _MIN_PHASE_DURATION = 0.08  # Minimum duration for a phase to be considered valid (seconds)
+    _VIEW_DETECTION_INTERVAL = 0.1  # Minimum time between view detection updates (seconds)
+    _VIEW_HISTORY_LEN = 8  # Number of frames to consider for view detection
+    _ASYMMETRY_HISTORY_LEN = 10  # Number of frames to consider for asymmetry detection
+    _KNEE_HISTORY_LEN = 5  # Number of frames to store for knee angle history
+    _VELOCITY_SMOOTHING = 3  # Number of frames to smooth velocity over
+    _VELOCITY_THRESHOLDS = {'side': 8, 'front': 12}  # Velocity thresholds for phase detection
+    _HYSTERESIS_MARGIN = 0.10  # 10% margin for phase transitions
 
-    _MIN_PHASE_DURATION = 0.08
-    _VIEW_DETECTION_INTERVAL = 0.1
-    _VIEW_HISTORY_LEN = 8
-    _ASYMMETRY_HISTORY_LEN = 10
-    _ELBOW_HISTORY_LEN = 5
-    _VELOCITY_SMOOTHING = 3
-    _HYSTERESIS_MARGIN = 0.10
-    _AMBIGUOUS_VIEW_MIN_TIME = 0.5
-    _AMBIGUOUS_VIEW_MIN_CONF = 0.7
-    _STICKY_VIEW_MIN_TIME = 2.0
-    _STICKY_VIEW_MIN_CONF = 0.7
-    _DEBUG_MODE = False
+    # View detection and stability parameters
+    _CALIBRATION_SAMPLES = 30  # Number of samples to collect for calibration
+    _MIN_CALIBRATION_CONFIDENCE = 0.7  # Minimum confidence for calibration to be considered valid
+    _AMBIGUOUS_VIEW_MIN_TIME = 0.5  # Minimum time to be considered ambiguous
+    _AMBIGUOUS_VIEW_MIN_CONF = 0.7  # Minimum confidence for ambiguous view
+    _STICKY_VIEW_MIN_TIME = 2.0  # Minimum time to be considered sticky
+    _STICKY_VIEW_MIN_CONF = 0.7  # Minimum confidence for sticky view
+    _DEBUG_MODE = False  # Debug flag to control profiling
+
+    def __init__(self, user_level: UserLevel = UserLevel.BEGINNER):
+        super().__init__(user_level)
+        # State tracking
+        self._rep_count = 0
+        self._current_phase = SquatPhase.REST
+        self._phase_start_time = time.time()
+        self._last_phase_transition = None
+        self._in_rep = False
+        self._current_rep_start_time = None
+        self._current_rep_quality = {"form_violations": [], "range_quality": 1.0}
+        self._completed_reps = []
+        
+        # View detection and analysis
+        self._current_view = "side"  # Default view
+        self._view_history = deque(maxlen=self._VIEW_HISTORY_LEN)
+        self._last_view_update = 0
+        self._view_confidence = 0.0
+        self._last_landmarks = None
+        self._last_angles = None
+        
+        # Movement tracking
+        self._last_knee_angle = None
+        self._knee_angle_history = {
+            "left": deque(maxlen=self._KNEE_HISTORY_LEN), 
+            "right": deque(maxlen=self._KNEE_HISTORY_LEN)
+        }
+        self._movement_direction = "stationary"
+        self._movement_velocity = 0.0
+        self._velocity_history = deque(maxlen=self._VELOCITY_SMOOTHING)
+        
+        # Form and symmetry
+        self._asymmetry_history = deque(maxlen=self._ASYMMETRY_HISTORY_LEN)
+        self._form_violations = []
+        
+        # Initialize view analyzers
+        self._view_analyzers = {k: v() for k, v in SQUAT_VIEW_ANALYZER_REGISTRY.items()}
+        for analyzer in self._view_analyzers.values():
+            analyzer.parent_analyzer = self
+        self._current_analyzer = self._view_analyzers.get('side')
+        
+        # Caches for performance
+        self._cached_phase_thresholds = {}
+        self._cached_form_rules = {}
+        
+        # Session calibration
+        self._session_calibration = SessionCalibration()
+        
+        # View stability tracking
+        self._last_view = None
+        self._last_view_confidence = 0.0
+        self._last_ambiguous_time = 0
+        self._ambiguous_since = None
+        self._sticky_view = None
+        self._sticky_view_since = None
+        self._sticky_view_conf = 0.0
+        
+        # Store last per-frame body metrics for debug printing
+        self._last_body_metrics = {
+            "shoulder_width": None,
+            "torso_length": None,
+            "shoulder_torso_ratio": None
+        }
+        
+        # Debug memory hooks
+        if self._DEBUG_MODE:
+            import tracemalloc
+            tracemalloc.start()
+            
+    def __del__(self):
+        """Cleanup profiling resources on object destruction"""
+        if self._DEBUG_MODE:
+            tracemalloc.stop()
+            
+    @classmethod
+    def enable_debug(cls):
+        """Enable debug mode"""
+        cls._DEBUG_MODE = True
+        tracemalloc.start()
+        
+    @classmethod
+    def disable_debug(cls):
+        """Disable debug mode"""
+        if cls._DEBUG_MODE:
+            tracemalloc.stop()
+        cls._DEBUG_MODE = False
+
+    def recalibrate(self):
+        """Allow recalibration mid-session (e.g., if user moves/camera changes)."""
+        self._session_calibration.recalibrate()
+        logger.info("Session recalibrated.")
+
+    def _detect_view(self, landmarks: Dict[str, List[float]]) -> Tuple[str, float, Optional[str]]:
+        try:
+            # Update calibration with new landmarks
+            self._session_calibration.update(landmarks)
+            # Store for debug output in trainer
+            torso_length = calculate_torso_length(landmarks)
+            shoulder_width = abs(landmarks["left_shoulder"][0] - landmarks["right_shoulder"][0]) if ("left_shoulder" in landmarks and "right_shoulder" in landmarks) else 0.0
+            perframe_ratio = (shoulder_width / torso_length) if (torso_length and torso_length > 0) else 0.0
+            self._last_body_metrics = {
+                "shoulder_width": shoulder_width,
+                "torso_length": torso_length,
+                "shoulder_torso_ratio": perframe_ratio
+            }
+            # --- Unified voting logic ---
+            votes = self.compute_view_votes(landmarks)
+            total = sum(votes.values())
+            if total == 0:
+                return "unknown", 0.0, "View could not be determined."
+            best_view = max(votes.items(), key=lambda x: x[1])
+            confidence = best_view[1] / total if total > 0 else 0.0
+            reposition_warning = None
+            if confidence < 0.6:
+                reposition_warning = f"Camera angle ambiguous. Votes: {votes}. Try moving to side or front."
+            return best_view[0], confidence, reposition_warning
+        except Exception as e:
+            logger.error(f"Error in _detect_view: {e}")
+            return "unknown", 0.0, None
+    
+        # It also ensures that the view is not changed too frequently.
+    def _update_view_detection(self, landmarks: Dict[str, List[float]]):
+        # Unified logic: always unpack three values from _detect_view
+        new_view, confidence, reposition_warning = self._detect_view(landmarks)
+        self._reposition_warning = reposition_warning
+        current_time = time.time()
+
+        # Check if enough time has passed since last detection
+        if current_time - self._last_view_detection_time < self._VIEW_DETECTION_INTERVAL:
+            return
+
+        self._last_view_detection_time = current_time
+        # Add to history, keeps a rolling buffer of recent detections for voting.
+        self._view_history.append((new_view, confidence))
+
+        # Process history if enough samples (3 or more) to ensure a valid view.
+        if len(self._view_history) >= 3:
+            weighted_votes = {}  # Dictionary to store the weighted votes for each view.
+            total_weight = 0  # Total weight of all votes.
+            # Calculate weighted votes for each view, weighted by confidence.
+            for view, conf in self._view_history:
+                if view not in weighted_votes:
+                    weighted_votes[view] = 0
+                weighted_votes[view] += conf
+                total_weight += conf
+            # Determine best view based on weighted voting, if the total weight is greater than 0.
+            if total_weight > 0:
+                best_view = max(weighted_votes.items(), key=lambda x: x[1])
+                if best_view[1] / total_weight > 0.6:  # 60% threshold
+                    self._current_view = best_view[0]
+                    self._view_confidence = best_view[1] / total_weight
+        else:
+            self._current_view = new_view
+            self._view_confidence = confidence
+
+        # Clear caches if view changed, helps prevent stale data from being used.
+        if self._current_view != self._last_view:
+            logger.info(f"[VIEW] Changed to {self._current_view} (confidence={self._view_confidence:.2f})")
+            self._cached_phase_thresholds.clear()
+            self._cached_form_rules.clear()
+
+        self._last_view = self._current_view
+        self._last_view_confidence = self._view_confidence
+        # No reposition_warning available in this context; nothing to return
+
+        
+    def _get_current_analyzer(self):
+        """Get the current view-specific analyzer based on the detected view."""
+        return self._current_analyzer or self._side_analyzer
+        
+    def _get_phase_thresholds(self) -> Dict[str, float]:
+        cache_key = (self._current_view, self.user_level)
+        if cache_key not in self._cached_phase_thresholds:
+            analyzer = self._get_current_analyzer()
+            if analyzer:
+                self._cached_phase_thresholds[cache_key] = analyzer.get_phase_thresholds(self.user_level)
+            else:
+                # Use config default or raise error if not found
+                view_cfg = _SQUAT_CONFIG["views"].get(self._current_view, {})
+                thresholds = view_cfg.get("phase_thresholds")
+                if thresholds:
+                    # Handle user level for bottom_reached/top_reached if dict
+                    level = self.user_level.name.lower() if hasattr(self.user_level, "name") else str(self.user_level).lower()
+                    result = {}
+                    for k, v in thresholds.items():
+                        if isinstance(v, dict):
+                            result[k] = v.get(level, v.get("beginner"))
+                        else:
+                            result[k] = v
+                    self._cached_phase_thresholds[cache_key] = result
+                else:
+                    raise ValueError(f"No phase thresholds for view {self._current_view} in config")
+        return self._cached_phase_thresholds[cache_key]
+        
+    def _get_required_angles(self) -> List[str]:
+        analyzer = self._get_current_analyzer()
+        if analyzer:
+            return analyzer.get_required_angles()
+        return _SQUAT_CONFIG["views"].get(self._current_view, {}).get("required_angles", [])
+        
+    def _get_form_rules(self, exercise_variant: Optional[str] = None) -> Dict[str, Dict[str, Dict[str, Any]]]: # Returns the form rules for the current view.
+        cache_key = (self._current_view, self.user_level, exercise_variant) # Composite key to prevent collisions accross variants and views.
+        if cache_key not in self._cached_form_rules:
+            analyzer = self._get_current_analyzer()
+            if analyzer:
+                self._cached_form_rules[cache_key] = analyzer.get_form_rules(self.user_level, exercise_variant)
+            else:
+                self._cached_form_rules[cache_key] = {}
+        return self._cached_form_rules[cache_key]
 
     def _get_average_knee_angle(self, angles: Dict[str, float]) -> Optional[float]:
-        """Returns the average knee angle for the current view."""
+        
         knee_angles = []
         if self._current_view == "side":
             left_valid = "left_knee" in angles and not np.isnan(angles["left_knee"])
@@ -214,152 +616,47 @@ class SquatAnalyzerBase(BaseExerciseAnalyzer):
             if "right_knee" in angles and not np.isnan(angles["right_knee"]):
                 knee_angles.append(angles["right_knee"])
         return np.mean(knee_angles) if knee_angles else None
-
-
-    def _compute_movement_direction(self, avg_knee):
-        """Compute movement direction based on knee angle history."""
-        if len(self._velocity_history) < 2:
-            return "stationary"
-        diff = self._velocity_history[-1] - self._velocity_history[-2]
-        if abs(diff) < 0.5:
-            return "stationary"
-        return "descending" if diff < 0 else "ascending"
-
-    def _is_valid_phase_transition(self, current_phase, new_phase, angles, phase_duration):
-        """Validates the phase transition, matching pushup analyzer logic."""
-        if phase_duration < self._MIN_PHASE_DURATION:
-            return False
-        if (current_phase == SquatPhase.DESCENT and new_phase == SquatPhase.REST):
-            return False
-        if (current_phase == SquatPhase.ASCENT and new_phase == SquatPhase.DESCENT):
-            return False
-        return True
-
-
-    def _update_phase_state_machine(self, angles: Dict[str, float], current_time: float) -> None:
-        """Robust state machine for squat phases, mirroring pushup analyzer logic."""
-        if not self._phase_start_time:
-            self._phase_start_time = current_time
-        phase_duration = current_time - self._phase_start_time
-        avg_knee = self._get_average_knee_angle(angles)
-        thresholds = self._current_analyzer.get_phase_thresholds(self.user_level)
-        new_phase = self._current_phase
-        # Track previous phase for rep counting
-        prev_phase = getattr(self, '_prev_phase', self._current_phase)
-        # Movement direction
-        movement_direction = self._compute_movement_direction(avg_knee) if avg_knee is not None else "stationary"
-        # Phase transitions with validation and duration
-        if avg_knee is None:
-            new_phase = SquatPhase.REST
-        elif self._current_phase == SquatPhase.REST:
-            if avg_knee < thresholds["descent_start"] and phase_duration >= self._MIN_PHASE_DURATION:
-                new_phase = SquatPhase.DESCENT
-        elif self._current_phase == SquatPhase.DESCENT:
-            if avg_knee <= thresholds["bottom_reached"] and movement_direction in ["stationary", "descending"] and phase_duration >= self._MIN_PHASE_DURATION:
-                new_phase = SquatPhase.BOTTOM
-        elif self._current_phase == SquatPhase.BOTTOM:
-            if avg_knee > thresholds["ascent_start"] and movement_direction == "ascending" and phase_duration >= self._MIN_PHASE_DURATION:
-                new_phase = SquatPhase.ASCENT
-        elif self._current_phase == SquatPhase.ASCENT:
-            if avg_knee >= thresholds["top_reached"] and phase_duration >= self._MIN_PHASE_DURATION:
-                new_phase = SquatPhase.TOP
-        elif self._current_phase == SquatPhase.TOP:
-            if avg_knee >= thresholds["rest_threshold"] and phase_duration >= self._MIN_PHASE_DURATION:
-                new_phase = SquatPhase.REST
-        # Only update phase if changed and valid
-        if new_phase != self._current_phase:
-            self._prev_phase = self._current_phase
-            self._current_phase = new_phase
-            self._phase_start_time = current_time
-        # Rep counting: only increment on ASCENT→TOP transition
-        if prev_phase == SquatPhase.ASCENT and self._current_phase == SquatPhase.TOP:
-            self._rep_count += 1
-            # Calculate and store rep quality
-            rep_quality = self._calculate_rep_quality(self._last_angles or {}, self._current_phase)
-            self._completed_reps.append(rep_quality)
-        # Incomplete rep feedback: if TOP→REST without BOTTOM
-        if prev_phase == SquatPhase.TOP and self._current_phase == SquatPhase.REST:
-            # Optionally, set a flag or feedback for incomplete rep
-            pass
-        self._movement_direction = movement_direction
-
-    def __init__(self, user_level: UserLevel = UserLevel.BEGINNER):
-        super().__init__(user_level)
-        self._rep_count = 0
-        self._current_phase = SquatPhase.REST
-        self._phase_start_time = None
-        self._current_view = "unknown"
-        self._view_history = deque(maxlen=8)
-        self._last_view_detection_time = 0
-        self._view_confidence = 0.0
-        self._last_landmarks = None
-        self._last_angles = None
-        self._last_phase = None
-        self._completed_reps = []
-        self._asymmetry_history = deque(maxlen=10)
-        self._velocity_history = deque(maxlen=3)
-        self._last_view = None
-        self._last_view_confidence = 0.0
-        self._view_analyzers = {k: v() for k, v in SQUAT_VIEW_ANALYZER_REGISTRY.items()}
-        for analyzer in self._view_analyzers.values():
-            analyzer.parent_analyzer = self
-        self._current_analyzer = self._view_analyzers.get('side', next(iter(self._view_analyzers.values())))
-        self._in_rep = False
-        self._phase_start_time = None
-        self._last_knee_angle = None
-        self._rep_start_time = None
-        self._current_rep_quality = {"form_violations": [], "range_quality": 0.0}
-
-    def get_exercise_name(self) -> str:
-        return "squat"
-
-    def get_required_landmarks(self) -> List[str]:
-        return self._current_analyzer.get_required_landmarks()
-
-    def get_required_angles(self) -> List[str]:
-        return self._current_analyzer.get_required_angles()
-
-    # Alias for compatibility with trainer.py
-class SquatAnalyzer(SquatAnalyzerBase):
-    def _is_rep_start_condition(self, angles: Dict[str, float], phase: str) -> bool:
-        """
-        Returns True if the current phase is the start of a squat rep (i.e., at the bottom).
-        Mirrors pushup analyzer logic but for squats.
-        """
-        return phase == SquatPhase.BOTTOM.value
-
-    def _is_rep_end_condition(self, angles: Dict[str, float], phase: str) -> bool:
-        """
-        Returns True if the current phase is the end of a squat rep (i.e., at the top).
-        Mirrors pushup analyzer logic but for squats.
-        """
-        return phase == SquatPhase.TOP.value
-
-    def get_form_rules(self, exercise_variant: Optional[str] = None) -> Dict[str, Dict[str, Any]]:
-        return self._current_analyzer.get_form_rules(self.user_level, exercise_variant)
-
+    
+    # Updates the movement tracking history and calculates the current movement direction and velocity.
+    # This method is called after each frame to keep track of the movement direction and velocity.
+    def _update_movement_tracking(self, angles: Dict[str, float], current_time: float) -> None:
+        for side in ["left", "right"]:
+            angle_key = f"{side}_knee"
+            if angle_key in angles and not np.isnan(angles[angle_key]):
+                self._knee_angle_history[side].append((angles[angle_key], current_time)) # Appends latest knee angle and time to history.
+        velocities = [] # List to store the velocities.
+        for side in ["left", "right"]:
+            history = self._knee_angle_history[side]
+            if len(history) >= 2:
+                angle_diff = history[-1][0] - history[-2][0]
+                time_diff = history[-1][1] - history[-2][1]
+                if time_diff > 0:
+                    velocity = angle_diff / time_diff # per-side angular velocity using last two data points
+                    velocities.append(velocity) # Append to list of velocities of left and right arms.
+        if velocities: # If there are velocities, append the mean velocity to the history.
+            mean_velocity = np.mean(velocities) # Average between left and right knee velocities.
+            self._velocity_history.append(mean_velocity) # Appends the mean velocity to the history.
+            
+            # Second averaging: Smooth out the movement over time
+            smoothed_velocity = np.mean(self._velocity_history) # Average over recent history
+            threshold = self._VELOCITY_THRESHOLDS.get(self._current_view, 10) # Gets the threshold for the current view.
+            if abs(smoothed_velocity) < threshold:
+                self._movement_direction = "stationary"
+            elif smoothed_velocity > 0:
+                self._movement_direction = "ascending"
+            else:
+                self._movement_direction = "descending"
+            self._movement_velocity = smoothed_velocity
+          
     def compute_view_votes(self, landmarks: Dict[str, List[float]]) -> Dict[str, float]:
         """
         Compute weighted votes for each view ('front', 'side', 'unknown') based on ratio, symmetry, and visibility.
         Returns a dict: {view: score}
         """
         votes = {"front": 0.0, "side": 0.0, "unknown": 0.0}
-        # Ratio: Shoulder-to-hip ratio, etc.
-        # ...
-        # (existing logic omitted for brevity)
-        return votes
-
-    def _detect_view(self, landmarks: Dict[str, List[float]]) -> str:
-        votes = self.compute_view_votes(landmarks)
-        best_view, best_score = max(votes.items(), key=lambda x: x[1])
-        if best_score == 0 or best_view == "unknown":
-            return self._last_view or "side"
-        return best_view
-
-    def compute_view_votes(self, landmarks: Dict[str, List[float]]) -> Dict[str, float]:
-        votes = {"front": 0.0, "side": 0.0, "unknown": 0.0}
         side_criteria = _SQUAT_CONFIG["views"]["side"].get("detection_criteria", {})
         front_criteria = _SQUAT_CONFIG["views"]["front"].get("detection_criteria", {})
+        
         torso_length = calculate_torso_length(landmarks)
         shoulder_width = abs(landmarks["left_shoulder"][0] - landmarks["right_shoulder"][0]) if ("left_shoulder" in landmarks and "right_shoulder" in landmarks) else 0.0
         perframe_ratio = (shoulder_width / torso_length) if (torso_length and torso_length > 0) else 0.0
@@ -374,6 +671,7 @@ class SquatAnalyzer(SquatAnalyzerBase):
         symmetry = None
         if ("left_shoulder" in landmarks and "right_shoulder" in landmarks):
             symmetry = abs(landmarks["left_shoulder"][1] - landmarks["right_shoulder"][1])
+
         front_sym = front_criteria.get("symmetry_threshold", 0.08)
         side_sym = side_criteria.get("symmetry_threshold", 0.15)
         if symmetry is not None:
@@ -394,117 +692,449 @@ class SquatAnalyzer(SquatAnalyzerBase):
             votes["unknown"] += 1.0
         return votes
 
-    def _detect_view(self, landmarks: Dict[str, List[float]]) -> str:
-        votes = self.compute_view_votes(landmarks)
-        best_view, best_score = max(votes.items(), key=lambda x: x[1])
-        if best_score == 0 or best_view == "unknown":
-            return self._last_view or "side"
-        return best_view
+    def _compute_movement_direction(self, avg_knee):
+        if len(self._velocity_history) < 2:
+            return "stationary"
+        diff = self._velocity_history[-1] - self._velocity_history[-2]
+        if abs(diff) < 0.5:
+            return "stationary"
+        return "descending" if diff < 0 else "ascending"
+    
+    def _update_phase_state_machine(self, angles: Dict[str, float], current_time: float) -> None: # State machine for push-up phases:
+        if not self._phase_start_time: # If the phase has not started, set the phase start time.
+            self._phase_start_time = current_time
+        phase_duration = current_time - self._phase_start_time # Calculate the duration of the current phase.
+        avg_elbow = self._get_average_elbow_angle(angles) # Get the average elbow angle for phase traching, rep depth and form scoring.
+        if avg_elbow is None: # If the average elbow angle is None, set the current phase to rest and return.
+            self._current_phase = SquatPhase.REST
+            self._phase_start_time = current_time
+            return # Return to avoid further processing.
+        
+        thresholds = self._get_phase_thresholds()
+        new_phase = None
+        if self._current_phase == SquatPhase.REST:
+            if avg_elbow < thresholds["descent_start"]:
+                new_phase = SquatPhase.DESCENT
+                self._rep_start_time = current_time
+        elif self._current_phase == SquatPhase.DESCENT:
+            if (avg_elbow <= thresholds["bottom_reached"] and self._movement_direction in ["stationary", "descending"]):
+                new_phase = SquatPhase.BOTTOM
+        elif self._current_phase == SquatPhase.BOTTOM:
+            if (avg_elbow > thresholds["ascent_start"] and self._movement_direction == "ascending"):
+                new_phase = SquatPhase.ASCENT
+        elif self._current_phase == SquatPhase.ASCENT:
+            if avg_elbow >= thresholds["top_reached"]:
+                # Rep is counted only when transitioning from ASCENT to TOP
+                # Check robust vertical depth before counting rep
+                vertical_depth = self._calculate_vertical_depth(self._last_landmarks) if hasattr(self, '_last_landmarks') else None
+                form_quality_cfg = _SQUAT_CONFIG.get("form_quality", {})
+                min_depth = form_quality_cfg.get("min_depth_achievement", 1.0)
+                if vertical_depth is not None and vertical_depth < min_depth:
+                    print(f"[DEBUG][WARNING] Rep counted but depth insufficient: {vertical_depth:.3f} < {min_depth}")
+                    self._last_violation = "Go a little bit lower."
+                else:
+                    self._last_violation = None
+                    self._rep_count += 1
+                    self._current_rep_quality = self._calculate_rep_quality(angles, SquatPhase.TOP)
+                    self._completed_reps.append(self._current_rep_quality)
+                    new_phase = SquatPhase.TOP
+        elif self._current_phase == SquatPhase.TOP:
+            # Only transition to REST, do not increment rep count here
+            if avg_elbow >= thresholds["rest_threshold"]:
+                # Detect incomplete rep: up to up without reaching bottom
+                if hasattr(self, '_last_phase') and self._last_phase == SquatPhase.TOP:
+                    # If the last phase was also TOP, and no BOTTOM was reached, give feedback
+                    print("[DEBUG][WARNING] Incomplete rep: Did not reach bottom. Provide feedback.")
+                    self._last_violation = "Incomplete rep: go all the way down."
+                new_phase = SquatPhase.REST
+                self._rep_start_time = None
+        # Track last phase for incomplete rep detection
+        self._last_phase = self._current_phase
+        if new_phase and self._is_valid_phase_transition(self._current_phase, new_phase, angles, phase_duration):
+            self._current_phase = new_phase
+            self._phase_start_time = current_time
+    
+    def _is_valid_phase_transition(self, current_phase, new_phase, angles, phase_duration):
+        if phase_duration < self._MIN_PHASE_DURATION:
+            return False
+        if (current_phase == SquatPhase.DESCENT and new_phase == SquatPhase.REST):
+            return False
+        if (current_phase == SquatPhase.ASCENT and new_phase == SquatPhase.DESCENT):
+            return False
+        return True
+    
+    def _calculate_vertical_depth(self, landmarks: Dict[str, List[float]]) -> Optional[float]:
+        """
+        Calculate squat depth as the vertical (Y) distance between hip and ankle,
+        normalized by torso length. Handles both front and side views robustly.
+        Returns a value where 0 = no depth, 1 = full depth (or more if below ankle).
+        """
+        if not landmarks:
+            return None
+        # Use both sides if available, else fallback to one
+        hips = []
+        ankles = []
+        for side in ["left", "right"]:
+            hip_key = f"{side}_hip"
+            ankle_key = f"{side}_ankle"
+            if hip_key in landmarks and ankle_key in landmarks:
+                hips.append(landmarks[hip_key][1])
+                ankles.append(landmarks[ankle_key][1])
+        if not hips or not ankles:
+            return None
+        # Use the lower of the two hips (min Y), and the higher of the two ankles (max Y)
+        hip_y = min(hips)
+        ankle_y = max(ankles)
+        raw_depth = ankle_y - hip_y
+        # Normalize by torso length (use left or right if available)
+        torso_length = None
+        if "left_shoulder" in landmarks and "left_hip" in landmarks:
+            torso_length = calculate_length(landmarks["left_shoulder"], landmarks["left_hip"])
+        elif "right_shoulder" in landmarks and "right_hip" in landmarks:
+            torso_length = calculate_length(landmarks["right_shoulder"], landmarks["right_hip"])
+        if torso_length and torso_length > 0:
+            norm_depth = raw_depth / torso_length
+        else:
+            norm_depth = raw_depth
+        return max(0.0, norm_depth)
 
-    def analyze_frame(self, landmarks: Dict[str, List[float]], angles: Dict[str, float], exercise_variant: Optional[str] = None) -> ExerciseState:
-        # --- View detection and smoothing ---
-        view = self._detect_view(landmarks)
-        self._view_history.append(view)
-        view_counts = Counter(self._view_history)
-        self._current_view = max(view_counts, key=view_counts.get)
-        self._current_analyzer = self._view_analyzers[self._current_view]
-        self._last_view = self._current_view
-        self._last_landmarks = landmarks
-        self._last_angles = angles
+    def _calculate_rep_quality(self, angles: Dict[str, float], phase) -> Dict[str, Any]:
+        """
+        Calculate rep quality for squats, including form violations, range quality, symmetry, depth, alignment, and tempo.
+        Structure and logic modeled after pushup analyzer, adapted for squat-specific metrics.
+        """
+        if phase != SquatPhase.TOP:
+            return self._current_rep_quality
 
-        # --- Strict missing landmark/angle checks ---
-        required_landmarks = self._current_analyzer.get_required_landmarks()
-        missing_landmarks = [l for l in required_landmarks if l not in landmarks or len(landmarks[l]) < 4 or landmarks[l][3] < self._current_analyzer.min_landmark_visibility]
+        form_quality_cfg = _SQUAT_CONFIG.get("form_quality", {})
+        min_body_alignment = form_quality_cfg.get("min_body_alignment_score", 0.7)
+        max_asymmetry = form_quality_cfg.get("max_asymmetry_score", 0.3)
+        min_depth_achievement = form_quality_cfg.get("min_depth_achievement", 0.8)
+
+        quality = {
+            "form_violations": [],
+            "range_quality": 0.0,
+            "symmetry_score": None,
+            "tempo_score": None,
+            "depth_achieved": 0.0,
+            "body_alignment_score": None,
+            "asymmetry_score": None,
+            "form_quality_score": 0.0
+        }
+
+        quality["form_violations"] = self.check_form_violations(angles)
+
+        # Calculate robust depth achievement
+        vertical_depth = self._calculate_vertical_depth(self._last_landmarks) if hasattr(self, '_last_landmarks') else None
+        if vertical_depth is not None:
+            quality["depth_achieved"] = vertical_depth
+        else:
+            # Fallback to knee angle method if vertical depth not available
+            avg_knee = self._get_average_knee_angle(angles) if hasattr(self, '_get_average_knee_angle') else None
+            thresholds = self._get_phase_thresholds() if hasattr(self, '_get_phase_thresholds') else {}
+            view_cfg = _SQUAT_CONFIG["views"].get(self._current_view, {})
+            ideal_depth = view_cfg.get("ideal_depth", 70)
+            max_depth = view_cfg.get("max_depth", 130)
+            if avg_knee is not None:
+                min_depth = thresholds.get("bottom_reached", 90)
+                if avg_knee <= ideal_depth:
+                    quality["range_quality"] = 1.0
+                elif avg_knee <= min_depth:
+                    quality["range_quality"] = 0.8
+                else:
+                    quality["range_quality"] = max(0, 1 - (avg_knee - min_depth) / (max_depth - min_depth))
+                quality["depth_achieved"] = max(0.0, max_depth - avg_knee)
+
+        # Calculate symmetry score
+        symmetry = self._calculate_symmetry_score(angles)
+        if symmetry is not None:
+            quality["symmetry_score"] = max(0, 1 - symmetry)
+            quality["asymmetry_score"] = symmetry
+        else:
+            quality["symmetry_score"] = None
+            quality["asymmetry_score"] = None
+
+        # Calculate body alignment score
+        if "body_alignment_score" in angles and not np.isnan(angles["body_alignment_score"]):
+            quality["body_alignment_score"] = angles["body_alignment_score"]
+
+        # Calculate overall form quality score
+        form_quality_factors = []
+        # Range quality factor
+        form_quality_factors.append(quality["range_quality"])
+        # Symmetry factor
+        if quality["symmetry_score"] is not None:
+            symmetry_factor = 1.0 if quality["asymmetry_score"] <= max_asymmetry else max(0, 1 - (quality["asymmetry_score"] - max_asymmetry) / (1 - max_asymmetry))
+            form_quality_factors.append(symmetry_factor)
+        # Body alignment factor
+        if quality["body_alignment_score"] is not None:
+            alignment_factor = 1.0 if quality["body_alignment_score"] >= min_body_alignment else max(0, quality["body_alignment_score"] / min_body_alignment)
+            form_quality_factors.append(alignment_factor)
+        # Depth achievement factor
+        if quality["depth_achieved"] > 0:
+            depth_factor = 1.0 if quality["depth_achieved"] >= min_depth_achievement else max(0, quality["depth_achieved"] / min_depth_achievement)
+            form_quality_factors.append(depth_factor)
+        # Calculate overall form quality as average of available factors
+        if form_quality_factors:
+            quality["form_quality_score"] = np.mean(form_quality_factors)
+
+        # Adaptive tempo: use average of last 3 reps if available
+        if hasattr(self, '_rep_start_time') and self._rep_start_time:
+            rep_duration = time.time() - self._rep_start_time
+            valid_tempos = [rep.get("tempo_score") for rep in self._completed_reps[-3:] if rep.get("tempo_score") is not None] if hasattr(self, '_completed_reps') else []
+            if valid_tempos:
+                avg_tempo = np.mean(valid_tempos)
+                tempo_deviation = abs(rep_duration - avg_tempo) / avg_tempo
+                quality["tempo_score"] = max(0, 1 - tempo_deviation)
+            else:
+                quality["tempo_score"] = None
+
+        return quality
+
+    def _calculate_symmetry_score(self, angles: Dict[str, float]) -> Optional[float]:
+        """
+        Calculate symmetry score for squats using both angle-based and coordinate-based asymmetry metrics.
+        Returns a normalized score where 0 = perfect symmetry, 1 = poor symmetry.
+        Structure and logic modeled after pushup analyzer, adapted for squat-specific metrics.
+        """
+        try:
+            symmetry_factors = []
+
+            # 1. Angle-based asymmetry (normalized by typical angle ranges)
+            angle_pairs = [
+                ("left_knee", "right_knee", 180.0),  # Knee angles typically 0-180°
+                ("left_hip", "right_hip", 180.0),    # Hip angles typically 0-180°
+                ("left_ankle", "right_ankle", 180.0) # Ankle angles typically 0-180°
+            ]
+
+            for left_angle, right_angle, max_range in angle_pairs:
+                if left_angle in angles and right_angle in angles:
+                    if not (np.isnan(angles[left_angle]) or np.isnan(angles[right_angle])):
+                        asymmetry = abs(angles[left_angle] - angles[right_angle])
+                        normalized_asymmetry = asymmetry / max_range
+                        normalized_asymmetry = min(1.0, max(0.0, normalized_asymmetry))  # Clamp to [0, 1]
+                        symmetry_factors.append(normalized_asymmetry)
+
+            # 2. Coordinate-based asymmetry (from pose_utils or calculated externally)
+            coordinate_metrics = [
+                ("knee_symmetry", 0.1),   # Threshold for poor symmetry
+                ("hip_symmetry", 0.08),   # Threshold for poor symmetry
+                ("ankle_symmetry", 0.08)  # Threshold for poor symmetry
+            ]
+
+            for metric, threshold in coordinate_metrics:
+                if metric in angles and not np.isnan(angles[metric]):
+                    normalized_asymmetry = angles[metric] / threshold
+                    normalized_asymmetry = min(1.0, max(0.0, normalized_asymmetry))  # Clamp to [0, 1]
+                    symmetry_factors.append(normalized_asymmetry)
+
+            if not symmetry_factors:
+                return None
+
+            # Calculate average asymmetry and add to history
+            avg_asymmetry = np.mean(symmetry_factors)
+            if not hasattr(self, '_asymmetry_history'):
+                self._asymmetry_history = deque(maxlen=10)
+            self._asymmetry_history.append(avg_asymmetry)
+
+            # Return smoothed average from history
+            return np.mean(list(self._asymmetry_history))
+
+        except Exception as e:
+            return None
+
+    def get_required_landmarks(self) -> List[str]: # Returns the required landmarks for the current view.
+        return ["left_shoulder", "right_shoulder", "left_elbow", "right_elbow", "left_wrist", "right_wrist", "left_hip", "right_hip", "left_ankle", "right_ankle", "left_ear", "right_ear", "nose"]
+
+    def get_required_angles(self) -> List[str]: # Returns the required angles for the current view.
+        analyzer = self._get_current_analyzer()
+        if analyzer:
+            return analyzer.get_required_angles()
+        return []
+
+    def get_form_rules(self, exercise_variant: Optional[str] = None) -> Dict[str, Dict[str, Dict[str, Any]]]:
+        return self._get_form_rules(exercise_variant)
+
+    def check_form_violations(self, angles: Dict[str, float], exercise_variant: Optional[str] = None) -> List[str]:
+        violations = []
+        rules = self.get_form_rules(exercise_variant)
+        # Convert rules dict to FormRule objects if needed
+        form_rules = []
+        for angle_name, thresholds in rules.items():
+            if isinstance(thresholds, dict):
+                min_val = thresholds.get("min")
+                max_val = thresholds.get("max")
+                message = thresholds.get("message")
+                min_message = thresholds.get("min_message")
+                max_message = thresholds.get("max_message")
+                form_rules.append(FormRule(angle_name, min_val, max_val, message, min_message, max_message))
+        # Check all form rules
+        for rule in form_rules:
+            result = rule.check(angles)
+            if result:
+                violations.append(result)
+        # Additional asymmetry and alignment checks
+        try:
+            # Check knee symmetry
+            if "knee_symmetry" in angles and not np.isnan(angles["knee_symmetry"]):
+                max_threshold = rules.get("knee_symmetry", {}).get("max", 0.1)
+                if angles["knee_symmetry"] > max_threshold:
+                    violations.append(f"Knee asymmetry too high: {angles['knee_symmetry']:.3f} > {max_threshold}")
+            # Check hip symmetry
+            if "hip_symmetry" in angles and not np.isnan(angles["hip_symmetry"]):
+                max_threshold = rules.get("hip_symmetry", {}).get("max", 0.08)
+                if angles["hip_symmetry"] > max_threshold:
+                    violations.append(f"Hip asymmetry too high: {angles['hip_symmetry']:.3f} > {max_threshold}")
+            # Check ankle symmetry
+            if "ankle_symmetry" in angles and not np.isnan(angles["ankle_symmetry"]):
+                max_threshold = rules.get("ankle_symmetry", {}).get("max", 0.08)
+                if angles["ankle_symmetry"] > max_threshold:
+                    violations.append(f"Ankle asymmetry too high: {angles['ankle_symmetry']:.3f} > {max_threshold}")
+            # Check body alignment score using form_quality config
+            form_quality_cfg = _SQUAT_CONFIG.get("form_quality", {})
+            if "body_alignment_score" in angles and not np.isnan(angles["body_alignment_score"]):
+                min_threshold = form_quality_cfg.get("min_body_alignment_score", 0.7)
+                if angles["body_alignment_score"] < min_threshold:
+                    violations.append(f"Poor body alignment: {angles['body_alignment_score']:.3f} < {min_threshold}")
+            # Check overall asymmetry score using form_quality config
+            asymmetry_score = self._calculate_symmetry_score(angles)
+            if asymmetry_score is not None:
+                max_threshold = form_quality_cfg.get("max_asymmetry_score", 0.3)
+                if asymmetry_score > max_threshold:
+                    violations.append(f"High asymmetry: {asymmetry_score:.3f} > {max_threshold}")
+            # Check depth achievement using robust vertical depth
+            vertical_depth = self._calculate_vertical_depth(self._last_landmarks) if hasattr(self, '_last_landmarks') else None
+            min_threshold = form_quality_cfg.get("min_depth_achievement", 1.0)
+            if vertical_depth is not None:
+                if vertical_depth < min_threshold:
+                    violations.append("Go a little bit lower.")
+        except Exception as e:
+            pass
+        return violations
+
+    def calculate_confidence(self, landmarks: Dict[str, List[float]]) -> float:
+        required_landmarks = self.get_required_landmarks()
+        visibilities = [landmarks[l][3] for l in required_landmarks if l in landmarks and len(landmarks[l]) > 3]
+        if not visibilities:
+            return 0.0
+        return np.mean(visibilities)
+
+    def validate_inputs(self, landmarks: Dict[str, List[float]], angles: Dict[str, float]) -> Tuple[bool, Optional[str]]:
+        missing_landmarks = set(self.get_required_landmarks()) - set(landmarks.keys())
+        missing_angles = set(self.get_required_angles()) - set(angles.keys())
         if missing_landmarks:
+            return False, f"Missing required landmarks: {', '.join(missing_landmarks)}"
+        if missing_angles:
+            return False, f"Missing required angles for {self._current_view} view: {', '.join(missing_angles)}"
+        return True, None
+
+    def _create_error_state(self, error_message: str) -> ExerciseState:
+        """Create an ExerciseState indicating an error or unreliable analysis."""
+        return ExerciseState(
+            name=self.get_exercise_name() if hasattr(self, 'get_exercise_name') else "squat",
+            phase=getattr(self, '_current_phase', None) and self._current_phase.value or "unknown",
+            rep_count=getattr(self, '_rep_count', 0),
+            is_correct_form=False,
+            violations=[error_message],
+            angles={},
+            confidence=0.0,
+            analysis_reliable=False,
+            error_message=error_message,
+            user_level=getattr(self, 'user_level', None) or UserLevel.BEGINNER
+        )
+
+# --- Concrete SquatAnalyzer implementation ---
+class SquatAnalyzer(SquatAnalyzerBase):
+    def _is_rep_start_condition(self, angles, phase):
+        return super()._is_rep_start_condition(angles, phase)
+
+    def _is_rep_end_condition(self, angles, phase):
+        return super()._is_rep_end_condition(angles, phase)
+
+    def analyze_frame(self, landmarks, angles, exercise_variant=None):
+        # --- Add foot distance calculation ---
+        from .pose_utils import calculate_foot_distance
+        # Only calculate if not already present
+        if "foot_distance" not in angles:
+            foot_dist = calculate_foot_distance(landmarks, normalize_by="shoulder_width")
+            if foot_dist is not None:
+                angles["foot_distance"] = foot_dist
+        # 1. Update view detection and select analyzer
+        self._update_view_detection(landmarks)
+        analyzer = self._get_current_analyzer()
+        current_view = self._current_view
+        print(f"[DEBUG] Current view: {current_view}, Analyzer: {analyzer}")
+        if analyzer is None:
+            print("[DEBUG] Analyzer context missing.")
+            return self._create_error_state("Analyzer context missing.")
+
+        # 2. Strict missing landmark/angle check
+        required_landmarks = analyzer.get_required_landmarks()
+        missing_landmarks = [l for l in required_landmarks if l not in landmarks or len(landmarks[l]) < 4 or landmarks[l][3] < analyzer.min_landmark_visibility]
+        if missing_landmarks:
+            print(f"[DEBUG] Missing landmarks: {missing_landmarks}")
+            # Return a special error state to indicate skip-frame
             return ExerciseState(
                 name=self.get_exercise_name(),
                 phase=getattr(self, '_current_phase', None) and self._current_phase.value or "unknown",
                 rep_count=getattr(self, '_rep_count', 0),
                 is_correct_form=False,
-                violations=[FeedbackGenerator.missing_landmark(l) for l in missing_landmarks],
+                violations=[],
                 angles=angles,
                 confidence=0.0,
                 analysis_reliable=False,
                 error_message="skip_frame",
                 user_level=getattr(self, 'user_level', None) or UserLevel.BEGINNER
             )
-        required_angles = self._current_analyzer.get_required_angles()
+        required_angles = analyzer.get_required_angles()
         missing_angles = [a for a in required_angles if a not in angles or angles[a] is None or (hasattr(np, 'isnan') and np.isnan(angles[a]))]
         if missing_angles:
-            return ExerciseState(
-                name=self.get_exercise_name(),
-                phase=getattr(self, '_current_phase', None) and self._current_phase.value or "unknown",
-                rep_count=getattr(self, '_rep_count', 0),
-                is_correct_form=False,
-                violations=[FeedbackGenerator.missing_angle(a) for a in missing_angles],
-                angles=angles,
-                confidence=0.0,
-                analysis_reliable=False,
-                error_message=f"Missing required angles: {', '.join(missing_angles)}",
-                user_level=getattr(self, 'user_level', None) or UserLevel.BEGINNER
-            )
+            print(f"[DEBUG] Missing angles: {missing_angles}")
+            return self._create_error_state(f"Missing required angles: {', '.join(missing_angles)}")
 
-        # --- Camera position validation ---
-        valid_cam, cam_feedback = self._current_analyzer.validate_camera_position(landmarks, angles)
-        if not valid_cam:
-            return ExerciseState(
-                name=self.get_exercise_name(),
-                phase=self._current_phase.value,
-                rep_count=self._rep_count,
-                is_correct_form=False,
-                violations=[cam_feedback or FeedbackGenerator.ambiguous_view()],
-                angles=angles,
-                confidence=0.0,
-                analysis_reliable=False,
-                error_message=cam_feedback,
-                user_level=self.user_level
-            )
+        # 3. Camera position validation
+        camera_valid, camera_error = analyzer.validate_camera_position(landmarks, angles)
+        print(f"[DEBUG] Camera valid: {camera_valid}, Error: {camera_error}")
+        if not camera_valid:
+            return self._create_error_state(camera_error or "Camera position invalid.")
 
-        # --- Symmetry/Asymmetry metrics ---
-        calculate_asymmetry_metrics(landmarks, angles)
+        # 4. Form rule & violation checks (foot_distance now included in angles)
+        violations = self.check_form_violations(angles, exercise_variant)
+        # Add last phase-based violation if present
+        if hasattr(self, '_last_violation') and self._last_violation:
+            violations.append(self._last_violation)
+            self._last_violation = None
+        is_correct_form = not violations
 
-        # --- Phase detection and rep counting (robust state machine) ---
+        # 5. Movement & phase tracking
         current_time = time.time()
+        self._last_landmarks = landmarks  # Store for robust depth calculation
+        self._update_movement_tracking(angles, current_time)
         self._update_phase_state_machine(angles, current_time)
 
-        # --- Form rule checks ---
-        violations = []
-        form_rules = self.get_form_rules(exercise_variant)
-        if self._current_phase == SquatPhase.BOTTOM:
-            for angle_name, rule in form_rules.items():
-                val = angles.get(angle_name)
-                if val is not None and hasattr(rule, 'min_val') and rule.min_val is not None and val < rule.min_val:
-                    violations.append(rule.min_message or rule.message or f"{angle_name} below minimum")
-                if val is not None and hasattr(rule, 'max_val') and rule.max_val is not None and val > rule.max_val:
-                    violations.append(rule.max_message or rule.message or f"{angle_name} above maximum")
-        # Track violations for rep quality
-        if self._in_rep:
-            self._current_rep_quality["form_violations"].extend(violations)
+        # 6. Rep quality & feedback
+        quality = self._calculate_rep_quality(angles, getattr(self, '_current_phase', None))
+        # Clamp and normalize depth_achieved
+        if "depth_achieved" in quality:
+            quality["depth_achieved"] = max(0.0, quality["depth_achieved"])
+        confidence = self.calculate_confidence(landmarks)
 
-        # --- Symmetry checks (front view) ---
-        if self._current_view == 'front':
-            if 'shoulder_symmetry' in angles and angles['shoulder_symmetry'] > 0.05:
-                violations.append("Shoulder symmetry violation")
-            if 'hip_symmetry' in angles and angles['hip_symmetry'] > 0.05:
-                violations.append("Hip symmetry violation")
-
-        # --- Visibility check ---
-        visible = check_landmark_visibility(landmarks, self.get_required_landmarks(), self._current_analyzer.min_landmark_visibility)
-        analysis_reliable = visible
-        error_message = None if visible else FeedbackGenerator.camera_error("Some body parts are not visible. Please adjust your position or camera.")
-
-        # --- Confidence calculation ---
-        confidence = 1.0 if analysis_reliable and not violations else 0.5 if analysis_reliable else 0.0
-
+        # 7. Return ExerciseState
+        # Remove 'form_violations' from quality and use as 'violations'
+        violations_from_quality = quality.pop("form_violations", [])
+        all_violations = violations or violations_from_quality
+        # Only pass valid fields to ExerciseState
         return ExerciseState(
             name=self.get_exercise_name(),
-            phase=self._current_phase.value,
-            rep_count=self._rep_count,
-            is_correct_form=len(violations) == 0,
-            violations=violations,
+            phase=getattr(self, '_current_phase', None) and self._current_phase.value or "unknown",
+            rep_count=getattr(self, '_rep_count', 0),
+            is_correct_form=is_correct_form,
+            violations=all_violations,
             angles=angles,
             confidence=confidence,
-            analysis_reliable=analysis_reliable,
-            error_message=error_message,
-            user_level=self.user_level
+            analysis_reliable=True,
+            error_message=all_violations[0] if all_violations else None,
+            user_level=getattr(self, 'user_level', None) or UserLevel.BEGINNER
         )
+    def get_exercise_name(self):
+        return super().get_exercise_name()

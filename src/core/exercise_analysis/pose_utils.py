@@ -1,3 +1,32 @@
+# --- Squat-specific Utilities ---
+def calculate_foot_distance(landmarks: Dict[str, List[float]], normalize_by: str = "shoulder_width") -> Optional[float]:
+    """
+    Calculate the normalized distance between the feet (left_ankle and right_ankle).
+    Optionally normalize by shoulder width or another body metric.
+    Returns None if required landmarks are missing.
+    """
+    if "left_ankle" not in landmarks or "right_ankle" not in landmarks:
+        return None
+    left_ankle = landmarks["left_ankle"]
+    right_ankle = landmarks["right_ankle"]
+    foot_dist = calculate_length(left_ankle, right_ankle)
+    if normalize_by == "shoulder_width":
+        if "left_shoulder" in landmarks and "right_shoulder" in landmarks:
+            shoulder_width = calculate_length(landmarks["left_shoulder"], landmarks["right_shoulder"])
+            if shoulder_width > 0:
+                return foot_dist / shoulder_width
+            else:
+                return None
+        else:
+            return None
+    elif normalize_by == "torso_length":
+        torso_length = calculate_torso_length(landmarks)
+        if torso_length and torso_length > 0:
+            return foot_dist / torso_length
+        else:
+            return None
+    else:
+        return foot_dist
 """
 pose_utils.py - Shared utilities for pose estimation, smoothing, and geometry.
 """

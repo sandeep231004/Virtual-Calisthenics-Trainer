@@ -10,7 +10,6 @@ from .exercise_analysis.squat_analyzer_base import SquatAnalyzer
 from .feedback.voice_feedback import VoiceFeedback
 from .pose_detection.mediapipe_detector2 import MediaPipePoseDetector
 
-
 class VirtualCalisthenicsTrainer:
     """Main class for the Virtual Calisthenics Trainer."""
 

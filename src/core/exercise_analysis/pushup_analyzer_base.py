@@ -177,6 +177,7 @@ class FrontViewAnalyzer(ViewSpecificAnalyzer):
             if lmk not in landmarks or len(landmarks[lmk]) < 4 or landmarks[lmk][3] < self.min_landmark_visibility:
                 logger.warning(FeedbackGenerator.missing_landmark(lmk))
                 return False, FeedbackGenerator.missing_landmark(lmk)
+            
         # 2. Check required angles for this view
         if angles is not None:
             required_angles = self.get_required_angles()
@@ -184,16 +185,19 @@ class FrontViewAnalyzer(ViewSpecificAnalyzer):
                 if ang not in angles or angles[ang] is None or (hasattr(np, 'isnan') and np.isnan(angles[ang])):
                     logger.warning(FeedbackGenerator.missing_angle(ang))
                     return False, FeedbackGenerator.missing_angle(ang)
+                
         # 3. Use centralized view voting logic
         parent = getattr(self, 'parent_analyzer', None)
         if parent is None:
             return False, "Analyzer context missing."
+        
         votes = parent.compute_view_votes(landmarks)
         total = sum(votes.values())
         if total == 0:
             return False, "View could not be determined."
         best_view, best_score = max(votes.items(), key=lambda x: x[1])
         confidence = best_score / total if total > 0 else 0.0
+
         # Store for debug output
         shoulder_width = abs(landmarks["left_shoulder"][0] - landmarks["right_shoulder"][0]) if ("left_shoulder" in landmarks and "right_shoulder" in landmarks) else 0.0
         torso_length = calculate_torso_length(landmarks)
@@ -204,10 +208,12 @@ class FrontViewAnalyzer(ViewSpecificAnalyzer):
                 "torso_length": torso_length,
                 "shoulder_torso_ratio": perframe_ratio
             }
+
         logger.debug(f"[CAM POS] View votes: {votes}, Best: {best_view}, Confidence: {confidence:.2f}")
         # Accept if best view matches this analyzer and confidence is high
         if best_view == self.view_type and confidence >= 0.4:
             return True, None
+        
         feedback = f"Camera not positioned for {self.view_type} view. Current: {best_view} (conf {confidence:.2f}). Votes: {votes}"
         return False, feedback
 
@@ -264,6 +270,7 @@ class FormRule:
         self.message = message
         self.min_message = min_message
         self.max_message = max_message
+
     def check(self, angles):
         val = angles.get(self.angle_name)
         if val is None or (isinstance(val, float) and (np.isnan(val))):
@@ -292,15 +299,24 @@ class SessionCalibration:
         self.calibrated = False
         self.avg_torso = 1.0
         self.avg_shoulder = 1.0
-    def update(self, landmarks):
+
+    def update(self, landmarks: Dict[str, List[float]]) -> None:
+        """
+        Update calibration with new landmark data.
+        
+        Args:
+            landmarks: Dictionary of landmark positions with visibility
+        """
         try:
             # Use consistent torso length calculation
             torso = calculate_torso_length(landmarks)
             if torso is not None:
                 self.torso_lengths.append(torso)
+
             if "left_shoulder" in landmarks and "right_shoulder" in landmarks:
                 shoulder = abs(landmarks["left_shoulder"][0] - landmarks["right_shoulder"][0])
                 self.shoulder_widths.append(shoulder)
+                
             if len(self.torso_lengths) > 10 and len(self.shoulder_widths) > 10:
                 self.avg_torso = np.mean(self.torso_lengths)
                 self.avg_shoulder = np.mean(self.shoulder_widths)

@@ -1,33 +1,53 @@
 {
   "views": {
     "side": {
-      "required_angles": ["left_knee", "right_knee", "left_hip", "right_hip", "left_ankle", "right_ankle"],
-      "phase_thresholds": {
-        "bottom_reached": {"beginner": 90, "intermediate": 100, "advanced": 110},
-        "top_reached": {"beginner": 170, "intermediate": 175, "advanced": 180},
-        "rest_threshold": {"beginner": 175, "intermediate": 178, "advanced": 180},
-        "descent_start": {"beginner": 160, "intermediate": 165, "advanced": 170},
-        "ascent_start": {"beginner": 100, "intermediate": 105, "advanced": 110}
-      },
-      "form_rules": {
-        "left_knee": {
-          "min": 80,
-          "max": 180,
-          "max_message": "Don't go too deep. Stop before your hips drop below your knees (60°)."
-        },
-        "right_knee": {
-          "min": 80,
-          "max": 180,
-          "max_message": "Don't go too deep. Stop before your hips drop below your knees (60°)."
-        },
-        "left_hip": {"min": 60, "max": 180},
-        "right_hip": {"min": 60, "max": 180}
-      },
       "detection_criteria": {
-        "shoulder_visibility_threshold": 0.4,
         "shoulder_torso_ratio": {"min": 0.20, "max": 0.40},
+        "shoulder_visibility_threshold": 0.4,
         "symmetry_threshold": 0.10,
         "confidence_threshold": 0.6
+      },
+      "required_angles": [
+        "left_knee", "right_knee", "left_hip", "right_hip", "left_ankle", "right_ankle"
+      ],
+      "form_rules": {
+        "knee_angle": {
+          "min": 80, "max": 180,
+          "min_message": "Bend your knees more at the bottom.",
+          "max_message": "Don't go too deep. Stop before your hips drop below your knees (60°).",
+          "message": "Bend your knees more at the bottom and avoid going too deep."
+        },
+        "hip_angle": {
+          "min": 60, "max": 180,
+          "min_message": "Lower your hips further to achieve proper squat depth.",
+          "max_message": "Don't overextend your hips; keep your torso upright.",
+          "message": "Lower your hips to reach proper depth and keep your torso upright."
+        },
+        "ankle_angle": {
+          "min": 70, "max": 120,
+          "min_message": "Keep your heels down and avoid excessive dorsiflexion.",
+          "max_message": "Don't let your heels lift off the ground.",
+          "message": "Keep your feet flat and avoid excessive ankle movement."
+        },
+        "foot_distance": {
+          "min": 0.15, "max": 0.35,
+          "min_message": "Widen your stance to shoulder-width or slightly wider.",
+          "max_message": "Bring your feet slightly closer together.",
+          "message": "Maintain a shoulder-width stance with your feet slightly turned out.",
+          "normalize_by": "shoulder_width"
+        },
+        "knee_tracking": {
+          "max": 0.1,
+          "max_message": "Keep your knees in line with your toes.",
+          "message": "Ensure your knees track in line with your toes throughout the movement."
+        }
+      },
+      "phase_thresholds": {
+        "descent_start": {"beginner": 160, "intermediate": 165, "advanced": 170},
+        "bottom_reached": {"beginner": 90, "intermediate": 100, "advanced": 110},
+        "ascent_start": {"beginner": 100, "intermediate": 105, "advanced": 110},
+        "top_reached": {"beginner": 170, "intermediate": 175, "advanced": 180},
+        "rest_threshold": {"beginner": 175, "intermediate": 178, "advanced": 180}
       },
       "max_depth": 130,
       "ideal_depth": 70,
@@ -37,31 +57,50 @@
       }
     },
     "front": {
-      "required_angles": ["left_knee", "right_knee"],
-      "phase_thresholds": {
-        "bottom_reached": {"beginner": 90, "intermediate": 100, "advanced": 110},
-        "top_reached": {"beginner": 170, "intermediate": 175, "advanced": 180},
-        "rest_threshold": {"beginner": 175, "intermediate": 178, "advanced": 180},
-        "descent_start": {"beginner": 160, "intermediate": 165, "advanced": 170},
-        "ascent_start": {"beginner": 100, "intermediate": 105, "advanced": 110}
-      },
-      "form_rules": {
-        "left_knee": {
-          "min": 80,
-          "max": 180,
-          "max_message": "Don't go too deep. Stop before your hips drop below your knees (60°)."
-        },
-        "right_knee": {
-          "min": 80,
-          "max": 180,
-          "max_message": "Don't go too deep. Stop before your hips drop below your knees (60°)."
-        }
-      },
       "detection_criteria": {
-        "shoulder_visibility_threshold": 0.4,
         "shoulder_torso_ratio": {"min": 0.32, "max": 0.60},
+        "shoulder_visibility_threshold": 0.4,
         "symmetry_threshold": 0.08,
         "confidence_threshold": 0.6
+      },
+      "required_angles": [
+        "left_knee", "right_knee"
+      ],
+      "form_rules": {
+        "knee_symmetry": {
+          "max": 0.1,
+          "max_message": "Keep your knees level and avoid twisting your legs.",
+          "message": "Keep your knees level and avoid twisting your legs."
+        },
+        "foot_distance": {
+          "min": 0.12, "max": 0.3,
+          "min_message": "Widen your stance to shoulder-width or slightly wider.",
+          "max_message": "Bring your feet slightly closer together.",
+          "message": "Maintain a shoulder-width stance with your feet slightly turned out.",
+          "normalize_by": "shoulder_width"
+        },
+        "knee_alignment": {
+          "max": 0.15,
+          "max_message": "Keep your knees in line with your toes to prevent injury.",
+          "message": "Ensure your knees track in line with your toes throughout the movement."
+        },
+        "hip_symmetry": {
+          "max": 0.1,
+          "max_message": "Keep your hips level and avoid shifting to one side.",
+          "message": "Distribute your weight evenly between both legs."
+        },
+        "torso_lean": {
+          "max": 0.2,
+          "max_message": "Keep your torso more upright and chest up.",
+          "message": "Maintain an upright torso position throughout the movement."
+        }
+      },
+      "phase_thresholds": {
+        "descent_start": {"beginner": 160, "intermediate": 165, "advanced": 170},
+        "bottom_reached": {"beginner": 90, "intermediate": 100, "advanced": 110},
+        "ascent_start": {"beginner": 100, "intermediate": 105, "advanced": 110},
+        "top_reached": {"beginner": 170, "intermediate": 175, "advanced": 180},
+        "rest_threshold": {"beginner": 175, "intermediate": 178, "advanced": 180}
       },
       "max_depth": 130,
       "ideal_depth": 70,
@@ -74,6 +113,12 @@
   "form_quality": {
     "min_body_alignment_score": 0.7,
     "max_asymmetry_score": 0.3,
-    "min_depth_achievement": 1.0
+    "min_depth_achievement": 1.0,
+    "optimal_foot_distance": {
+      "min": 0.18,
+      "max": 0.28,
+      "ideal": 0.23
+    },
+    "knee_tracking_tolerance": 0.12
   }
 }
